@@ -1,0 +1,17 @@
+import { defineChain, parseAbi, getAddress, type Address } from 'viem';
+export const CHAIN_ID = 57057;
+// Existing project wallet; testnet only. Choose a production treasury separately.
+export const TESTNET_TREASURY = getAddress('0xabFD88449fD3D789c578A66Af5A64a239253572B');
+export const RPC = 'https://rpc-zk.tanenbaum.io';
+export const EXPLORER = 'https://explorer-zk.tanenbaum.io';
+export const ZKSYS = getAddress('0x6EBb170f69D886916D9ee9E585CE39E626CbC35d');
+export const TUSD = getAddress('0x233440c6155e0ad350ebcf33013bc9b52ad37793');
+export const chain = defineChain({id:CHAIN_ID,name:'zkSYS Testnet',nativeCurrency:{name:'Test SYS',symbol:'TSYS',decimals:18},rpcUrls:{default:{http:[RPC]}},blockExplorers:{default:{name:'zkSYS Explorer',url:EXPLORER}},testnet:true});
+export const erc20 = parseAbi(['function name() view returns (string)','function symbol() view returns (string)','function decimals() view returns (uint8)','function balanceOf(address) view returns (uint256)','function allowance(address,address) view returns (uint256)','function approve(address,uint256) returns (bool)','function mint(address,uint256)','function owner() view returns (address)']);
+export const routerAbi = parseAbi(['function factory() view returns (address)','function WETH() view returns (address)','function getAmountsOut(uint256,address[]) view returns (uint256[])','function swapExactETHForTokens(uint256,address[],address,uint256) payable returns (uint256[])','function swapExactTokensForETH(uint256,uint256,address[],address,uint256) returns (uint256[])','function swapExactTokensForTokens(uint256,uint256,address[],address,uint256) returns (uint256[])','function addLiquidityETH(address,uint256,uint256,uint256,address,uint256) payable returns (uint256,uint256,uint256)']);
+export const factoryAbi = parseAbi(['function feeTo() view returns (address)','function feeToSetter() view returns (address)','function setFeeTo(address)','function getPair(address,address) view returns (address)','function createPair(address,address) returns (address)']);
+export const pairAbi = parseAbi(['function token0() view returns (address)','function token1() view returns (address)','function getReserves() view returns (uint112,uint112,uint32)','event Swap(address indexed sender,uint256 amount0In,uint256 amount1In,uint256 amount0Out,uint256 amount1Out,address indexed to)']);
+export function minimumOutput(amount: bigint, bps: number): bigint { if(amount <= 0n || !Number.isInteger(bps) || bps < 0 || bps > 500) throw new Error('Invalid quote or slippage (maximum 5%)'); const minimum=amount * BigInt(10000-bps)/10000n; if(minimum===0n)throw new Error('Amount too small to protect');return minimum; }
+export function route(input: Address, output: Address, wrappedSYS: Address): Address[] { if(input.toLowerCase()===output.toLowerCase()) throw new Error('Choose different assets'); return input.toLowerCase()===wrappedSYS.toLowerCase() || output.toLowerCase()===wrappedSYS.toLowerCase() ? [input,output] : [input,wrappedSYS,output]; }
+export async function assertTestnet(client: {getChainId():Promise<number>}) { if(await client.getChainId() !== CHAIN_ID) throw new Error('Wrong network: only zkSYS testnet 57057 is permitted'); }
+export interface Deployment {chainId:57057; wrappedSYS?:Address;factory?:Address;router?:Address;zksys:Address;tusd:Address;pairZKSYS?:Address;pairUSD?:Address;block?:string;protocolFeeRecipient?:Address;transactions:Record<string,`0x${string}`>}

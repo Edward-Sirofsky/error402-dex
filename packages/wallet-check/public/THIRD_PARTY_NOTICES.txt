@@ -1,0 +1,10 @@
+TradingView Lightweight Charts 5.3.0
+Copyright TradingView, Inc. Licensed under Apache License 2.0.
+https://www.tradingview.com/ — see lightweight-charts-LICENSE.txt.
+The chart displays TradingView attribution and a link.
+
+This application also includes React (MIT), viem (MIT), and their dependencies.
+The local source audit contains dependency lockfiles and installed package licenses.
+V2 contracts derive from Uniswap V2 (GPL-3.0). Original Solidity headers and notices
+are retained in the local contract source. Repository privacy does not remove
+the license obligations of any distributed derivative work.

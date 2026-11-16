@@ -1,0 +1,23 @@
+{
+  "chainId": 57057,
+  "zksys": "0x6EBb170f69D886916D9ee9E585CE39E626CbC35d",
+  "tusd": "0x233440C6155E0aD350Ebcf33013BC9b52aD37793",
+  "transactions": {
+    "deploy-wrappedSYS": "0xdb3c5a713b21a270b53c95bda7f2cceaa78fe2e878c9bfcda3928594d4dbf269",
+    "deploy-factory": "0x32c249a9d22db219ca7db17385f6f4d8fa906ea1f496193158d1d293c526f77a",
+    "deploy-router": "0x7cb858fcbbeddc20ab9cd2e5478699f4234ac93a394b0ff0d9e81c68ab6be482",
+    "enable-protocol-fee": "0xbb3a30cae828d748af5ffb73c685d89a4ffc27af9d43e9f73aa3a6f186253576",
+    "create-pairZKSYS": "0xa2192c595555fc7e4c1bad8d2698fa3cf900634872c51decb7ec5391e54d986c",
+    "create-pairUSD": "0x371641f9d48e7cf294cb0290806c0d78748c11a64cf03fea3403f82e51ea66b1",
+    "mint-existing-tusd": "0x496166e18cf5fff77ce833b4787b73e9dc2e98ff3b24e5a8903ffe2b582919e8",
+    "approve-tusd-liquidity": "0x31445df867a1f67cabce202855ace2fd21913b1618dcb9d0b0b93a0eb955a9f1",
+    "seed-tusd-pool": "0x5884be5daef192b67c8ec004aac49c091c1ecb83384d36a5e96da9f44e36935d"
+  },
+  "block": "9920",
+  "wrappedSYS": "0xed563f8c2fbef9b6e95b0dce4f85f9b5787804e9",
+  "factory": "0x06a9d6b2c3e9fa11a77ce80bfb35406525ddd022",
+  "router": "0x41c6eb669e90c8233a574c23c5bfcb72d8c5acff",
+  "protocolFeeRecipient": "0xabFD88449fD3D789c578A66Af5A64a239253572B",
+  "pairZKSYS": "0xdA55024740502eEDAF9b10f33bEd4eB562C3E8ba",
+  "pairUSD": "0xB8ED4ee2938Fe9cFa4268A3A23dE7733B912eeaB"
+}

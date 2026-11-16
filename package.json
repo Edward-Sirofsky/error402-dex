@@ -1,0 +1,27 @@
+{
+  "name": "error402-dex",
+  "private": true,
+  "version": "0.1.0",
+  "description": "error402 DEX on zkSYS testnet: Uniswap V2 deployment configuration, tests and the trading website",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "typecheck": "tsc -p packages/dex && tsc -p packages/wallet-check",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "demo": "node --import tsx packages/dex/src/demo.ts",
+    "dev": "npm run dev --workspace @error402/wallet-check",
+    "build": "npm run build --workspace @error402/wallet-check"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vitest": "5.1.0"
+  }
+}
