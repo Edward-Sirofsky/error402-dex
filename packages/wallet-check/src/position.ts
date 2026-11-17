@@ -72,3 +72,4 @@ export function checkWithdrawal(shown:PoolSnapshot|undefined,fresh:PoolSnapshot,
  if(now.native<reviewed.minNative||now.token<reviewed.minToken)throw new Error('The pool moved more than the 0.5% allowed since these amounts were shown. Review the updated amounts, then remove again.');
  return {lp:fresh.lp,minNative:reviewed.minNative,minToken:reviewed.minToken};
 }
+
