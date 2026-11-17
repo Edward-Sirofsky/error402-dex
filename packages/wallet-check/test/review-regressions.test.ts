@@ -118,7 +118,7 @@ describe('R1 — late callbacks never resurrect or overwrite a record',()=>{
  it('the wallet sends after the user stopped waiting and dismissed: the request is tracked again as submitted, without touching the page status',async()=>{
   const s=memory(),stages:Stage[]=[],late=vi.fn();let onHash!:(hash:`0x${string}`)=>void;
   await expect(submitWithLock({storage:s,kind:'approve',label:'Approve tUSD spending',account:user,to:token,data:approveData,value:0n,deadline:null,position:async()=>({nonce:8,block:100n}),notify:x=>stages.push(x),late,
-   send:async(hashCallback,before)=>{onHash=hashCallback;before();throw stopWaiting()}})).rejects.toMatchObject({code:'TX_UNCERTAIN'});
+   send:async(hashCallback,before)=>{onHash=hashCallback;await before();throw stopWaiting()}})).rejects.toMatchObject({code:'TX_UNCERTAIN'});
   const [kept]=readLocks(s);expect(kept).toMatchObject({uncertain:true,phase:'awaiting-wallet'});
   clearLock(s,kept.id); // the user dismissed it
   onHash(h(5)); // ...and then the wallet broadcast it after all
@@ -148,10 +148,13 @@ describe('R2 — a historical approval is never confirmed as the current request
   const {resolution}=await recover(approval({phase:'submitted',hash:h(2),txNonce:8}),reader(),(T+10)*1000);
   expect(resolution).toMatchObject({state:'submitted',hash:h(2)});
  });
- it('control: the current approval, mined at nonce 8, is still found and confirmed',async()=>{
+ it('control: the current approval, mined at nonce 8, is found but reported only as a possible match (review TX-04)',async()=>{
   const current:ChainTx={...old,hash:h(3),nonce:8,blockNumber:101n};
   const r=reader({receipt:async hash=>hash===h(1)||hash===h(3)?{status:'success',transactionHash:hash}:null,blockTransactions:async n=>n===100n?[old]:n===101n?[current]:[]});
-  expect((await recover(approval(),r,(T+10)*1000)).resolution).toEqual({state:'confirmed',hash:h(3),repriced:false});
+  // Matching by spender and a nonce lower bound cannot tell this approval from an earlier one still pending when the
+  // request was made, so it is never declared confirmed and the record stays (the user may stop tracking it).
+  const {resolution}=await recover(approval(),r,(T+10)*1000);
+  expect(resolution).toEqual({state:'possible',hash:h(3),dismissible:true});expect(isFinal(resolution)).toBe(false);
  });
  it('laterSameRequest excludes anything before the captured nonce',()=>{
   const r=approval();expect(laterSameRequest(old,r)).toBe(false);expect(laterSameRequest({...old,nonce:8},r)).toBe(true);expect(laterSameRequest({...old,nonce:8},{...r,nonce:null})).toBe(false);

@@ -87,7 +87,7 @@ describe('recovery of a submitted transaction (hash known)',()=>{
 
 describe('approvals (no deadline)',()=>{
  it('never expires by time, but may be dismissed because repeating an approval is harmless',async()=>{const c=chain({time:T0+999999});expect((await recover(approveRecord(),c.reader,now(T0+999999))).resolution).toEqual({state:'awaiting',until:null,dismissible:true})});
- it('adopts an approval confirmed after a reload even if the amount was edited in the wallet',async()=>{const c=chain();const edited=(approveData.slice(0,74)+'0'.repeat(63)+'5') as `0x${string}`;c.mine(tx(h(4),{to:token,value:0n,input:edited}),101n);expect((await recover(approveRecord(),c.reader,now(T0+60))).resolution).toEqual({state:'confirmed',hash:h(4),repriced:false})});
+ it('an approval confirmed after a reload, amount edited in the wallet: a possible match, never adopted as confirmed (review TX-04)',async()=>{const c=chain();const edited=(approveData.slice(0,74)+'0'.repeat(63)+'5') as `0x${string}`;c.mine(tx(h(4),{to:token,value:0n,input:edited}),101n);expect((await recover(approveRecord(),c.reader,now(T0+60))).resolution).toEqual({state:'possible',hash:h(4),dismissible:true})});
  it('cannot be dismissed while its transaction is visibly pending',async()=>{const c=chain();c.state.txs.set(h(1),tx(h(1),{to:token,value:0n,input:approveData}));expect((await recover(approveRecord({phase:'submitted',hash:h(1)}),c.reader,now(T0+60))).resolution).toMatchObject({state:'submitted',dismissible:false})});
  it('can be dismissed when the network has no trace of it',async()=>{const c=chain();expect((await recover(approveRecord({phase:'submitted',hash:h(1)}),c.reader,now(T0+60))).resolution).toMatchObject({state:'submitted',seen:false,dismissible:true})});
 });

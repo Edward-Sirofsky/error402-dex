@@ -1,10 +1,13 @@
-import ganache from 'ganache';
 import {createPublicClient,createWalletClient,custom,parseEther,parseUnits, type Address, type Abi} from 'viem';
 import {chain,erc20,routerAbi,factoryAbi} from '../src/shared.js';
 import {factory,router,wrapped,localTestUSD,type Artifact} from '../src/contracts.js';
 import {configureProtocolFee} from '../src/fees.js';
 export async function fixture(feesEnabled=true){
- const provider=ganache.provider({chain:{chainId:57057},logging:{quiet:true},wallet:{totalAccounts:3,defaultBalance:100},miner:{blockGasLimit:30000000}});
+ // Disposable in-process EVM (Hardhat's EDR) with chain ID 57057 and Hardhat's public test accounts; nothing touches a network.
+ process.env.HARDHAT_DISABLE_TELEMETRY='true'; // no usage analytics or error reports: tests never contact any server
+ const {createHardhatRuntimeEnvironment}=await import('hardhat/hre');
+ const hre=await createHardhatRuntimeEnvironment({networks:{local:{type:'edr-simulated',chainId:57057,accounts:{count:3,accountsBalance:parseEther('100')},blockGasLimit:30000000,loggingEnabled:false}}});
+ const connection=await hre.network.connect('local');const provider=connection.provider;
  const transport=custom(provider as never);const client=createPublicClient({chain,transport});const wallet=createWalletClient({chain,transport});
  const [owner,other,treasury]=await wallet.getAddresses();if(!owner||!other||!treasury)throw new Error('No test accounts');
  const write=async(address:Address,abi:Abi,functionName:string,args:unknown[]=[],value=0n,account=owner)=>{const gas=await client.estimateContractGas({account,address,abi,functionName,args,value});const hash=await wallet.writeContract({account,chain,address,abi,functionName,args,value,gas:gas*2n});const receipt=await client.waitForTransactionReceipt({hash});if(receipt.status!=='success')throw new Error('Reverted '+functionName+' gas used '+receipt.gasUsed+' estimate '+gas);return receipt;};
@@ -17,5 +20,5 @@ export async function fixture(feesEnabled=true){
  const deadline=(await client.getBlock()).timestamp+3600n;
  for(const t of [token,usd]){await write(t,erc20,'mint',[owner,parseUnits('10000',6)]);await write(t,erc20,'approve',[r,parseUnits('10000',6)]);await write(r,routerAbi,'addLiquidityETH',[t,parseUnits('1000',6),parseUnits('1000',6),parseEther('1'),owner,deadline],parseEther('1'));}
  const p=await client.readContract({address:f,abi:factoryAbi,functionName:'getPair',args:[w,token]});
- return {client,wallet,owner,other,treasury,w,f,r,token,usd,p,deadline,write,wrapperArtifact,close:()=>provider.disconnect()};
+ return {client,wallet,owner,other,treasury,w,f,r,token,usd,p,deadline,write,wrapperArtifact,close:()=>connection.close()};
 }

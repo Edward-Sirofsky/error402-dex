@@ -1,14 +1,15 @@
 import React,{useEffect,useRef,useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import {MarketChart} from './MarketChart';
-import {marketHistory,readHistoryCache,saveHistoryCache,liquidityAbi,removalAmounts,type Trade,type MarketHistory} from './market';
+import {marketHistory,readHistoryCache,saveHistoryCache,type Trade,type MarketHistory} from './market';
+import {readPool,positionOf,withdrawal,checkWithdrawal,type PoolSnapshot} from './position';
 import './approved-glass.css';
 import {getAddress,encodeFunctionData,type Address,type Hex,type Abi,parseAbi} from 'viem';
 import {transactionDeadline,client,guard,send,amount,balance,switchNetwork,formatUnits,erc20,routerAbi,pairAbi,minimumOutput,chainReader,releasesLock,TxError,type Connection,type Provider} from './wallet';
 import {TESTNET_TREASURY,factoryAbi,ZKSYS,TUSD,EXPLORER,route,type Deployment} from '../../dex/src/shared';
 import {QuoteBook,SLIPPAGE_BPS,approvalAmount,approvalRequired,swapCall,type ApprovalMode} from './quote-flow';
 import {SwapDetails,PriceChange} from './SwapDetails';
-import {readLocks,clearLock,replaceLock,lockFor,recover,explain,isFinal,submitWithLock,webLocks,stageLabels,dismissLabel,dismissNotice,LOCK_KEY,LEGACY_LOCK_KEY,type PendingRecord,type Resolution,type Stage,type TxKind} from './tx-lock';
+import {readLocks,loadLocks,settleLock,dropLock,storeLock,lockFor,recover,explain,isFinal,submitWithLock,webLocks,stageLabels,dismissLabel,dismissNotice,LOCK_KEY,LEGACY_LOCK_KEY,type PendingRecord,type Resolution,type Stage,type TxKind} from './tx-lock';
 import {Latest,Poller,freshness,freshnessText,tradeTime,networkNotice} from './refresh';
 import manifest from '../../dex/deployments/zksys-testnet.json';
 
@@ -21,13 +22,15 @@ const POOL_REFRESH_MS=30000,HISTORY_REFRESH_MS=60000,RECOVERY_REFRESH_MS=15000;
 const STORAGE_BLOCKED='This browser is blocking site storage. error402 needs it to remember an open wallet request and prevent duplicate transactions, so nothing was sent. Allow site data for this page and reload.';
 type Wallet={name:string;provider:Provider};
 type Quote={path:Address[];input:bigint;output:bigint;impact:number;minimum:bigint;time:number;from:number;to:number;text:string};
-type PoolState={native:bigint;token:bigint;lp:bigint;total:bigint;kLast:bigint};
 const emptyTrades:Trade[]=[];
 const short=(v:string)=>v.slice(0,8)+'…'+v.slice(-6);
 // The theme and chart cache are conveniences: if storage is unavailable the page still works without them.
 const remembered=(key:string)=>{try{return localStorage.getItem(key)}catch{return null}};
 const remember=(key:string,value:string)=>{try{localStorage.setItem(key,value)}catch{}};
-function storedLocks():{locks:PendingRecord[];ok:boolean}{try{return {locks:readLocks(localStorage),ok:true}}catch{return {locks:[],ok:false}}}
+// Every write of the stored transaction records runs under one lock shared by all tabs of this site.
+const store=storeLock();
+// A display read: it never writes (any migration of old data runs under the lock, see loadLocks).
+function storedLocks():{locks:PendingRecord[];ok:boolean}{try{return {locks:readLocks(localStorage,Date.now(),false),ok:true}}catch{return {locks:[],ok:false}}}
 
 export function App(){
  const [mode,setMode]=useState<'light'|'dark'>(()=>remembered('error402-mode')==='dark'?'dark':'light');
@@ -50,6 +53,7 @@ export function App(){
  const [resolutions,setResolutions]=useState<Record<string,Resolution>>({}),[stage,setStage]=useState<Stage>('idle');
  const pending=lockFor(locks,connection?.address??null);
  function syncLocks(){const next=storedLocks();setLocks(next.locks);setStorageOk(next.ok)}
+ useEffect(()=>{loadLocks(store,localStorage).then(syncLocks,()=>setStorageOk(false))},[]); // migrate old or unreadable records once, under the lock
  const [from,setFrom]=useState(0),[to,setTo]=useState(1),[input,setInput]=useState('0.0001');
  const quoteBook=useRef(new QuoteBook<Quote>());
  const [quotes,setQuotes]=useState(()=>quoteBook.current.snapshot());
@@ -59,7 +63,7 @@ export function App(){
  const [step,setStep]=useState('');
  function clearQuote(){quoteBook.current.reset();setQuotes(quoteBook.current.snapshot());}
  function syncQuote(){setQuotes(quoteBook.current.snapshot());}
- const [balances,setBalances]=useState<string[]>([]),[pool,setPool]=useState<PoolState>();
+ const [balances,setBalances]=useState<string[]>([]),[pool,setPool]=useState<PoolSnapshot>();
  const [poolAt,setPoolAt]=useState<number>(),[poolLoading,setPoolLoading]=useState(false),[poolFailed,setPoolFailed]=useState(false);
  const [headTime,setHeadTime]=useState<number>(); // timestamp of the latest block, to notice a stalled network
  const [nativeDeposit,setNativeDeposit]=useState('0.0001'),[tokenDeposit,setTokenDeposit]=useState('');
@@ -129,18 +133,17 @@ export function App(){
  const poolPoller=useRef<Poller>(undefined),poolPair=useRef<Address>(undefined);
  useEffect(()=>{
   const sequence=new Latest();let reported='';
-  if(poolPair.current!==pair){poolPair.current=pair;setPool(undefined);setPoolAt(undefined)} // keep figures on screen when only the wallet changed
+  if(poolPair.current!==pair){poolPair.current=pair;setPool(undefined);setPoolAt(undefined)} // keep pool figures on screen when only the wallet changed; the position is shown only for the account it was read for (positionOf)
   setPoolFailed(false);
   const load=async()=>{
    const ticket=sequence.begin();setPoolLoading(true);
    try{
     if(ready){
-     const p=pair;
      try{
-      const [reserves,token0,total,lp,kLast,head]=await Promise.all([client.readContract({address:p,abi:pairAbi,functionName:'getReserves'}),client.readContract({address:p,abi:pairAbi,functionName:'token0'}),client.readContract({address:p,abi:lpAbi,functionName:'totalSupply'}),connection?balance(connection.address,p):0n,client.readContract({address:p,abi:liquidityAbi,functionName:'kLast'}),client.getBlock()]);
+      // One block for every figure, tagged with the account it belongs to (see position.ts).
+      const snapshot=await readPool(client,{pair,account:connection?.address??null,wrapped:deployment.wrappedSYS!,factory:deployment.factory!});
       if(!sequence.isCurrent(ticket))return;
-      const nativeFirst=token0.toLowerCase()===deployment.wrappedSYS!.toLowerCase();
-      setPool({native:reserves[nativeFirst?0:1],token:reserves[nativeFirst?1:0],total,lp,kLast});setPoolAt(Date.now());setPoolFailed(false);setHeadTime(Number(head.timestamp));
+      setPool(snapshot);setPoolAt(Date.now());setPoolFailed(false);setHeadTime(Number(snapshot.time));
      }catch{if(sequence.isCurrent(ticket))setPoolFailed(true)}
     }
     if(connection){
@@ -172,7 +175,7 @@ export function App(){
   if(recovery.current)return manual?recovery.current.then(()=>recoverLocks(true)):recovery.current;
   const work=(async()=>{
    let stored:PendingRecord[];
-   try{stored=readLocks(localStorage)}catch{setStorageOk(false);return}
+   try{stored=await loadLocks(store,localStorage)}catch{setStorageOk(false);return}
    for(const item of stored){
     try{
      const {record,resolution}=await recover(item,chainReader);
@@ -180,13 +183,13 @@ export function App(){
      // dismissed, settled in another tab or updated (e.g. a late hash from the wallet), the result is stale: drop it
      // and let the next check start from the stored record.
      if(isFinal(resolution)){
-      if(!replaceLock(localStorage,item,null))continue;
+      if(!await settleLock(store,localStorage,item,null))continue;
       const result=explain(record,resolution);setStage(result.stage);setStatus(result.text);
       if('hash' in resolution)setTx(resolution.hash);
       setResolutions(old=>{const next={...old};delete next[item.id];return next});
       clearQuote();setRefresh(x=>x+1);
      }else{
-      if(JSON.stringify(record)!==JSON.stringify(item)&&!replaceLock(localStorage,item,record))continue;
+      if(JSON.stringify(record)!==JSON.stringify(item)&&!await settleLock(store,localStorage,item,record))continue;
       setResolutions(old=>({...old,[item.id]:resolution}));
      }
     }catch{if(manual)setStatus('Could not reach the network to check this request. Nothing was changed; it will be checked again automatically.')}
@@ -202,8 +205,8 @@ export function App(){
   const visible=()=>poller.resume();document.addEventListener('visibilitychange',visible);
   return()=>{poller.stop();document.removeEventListener('visibilitychange',visible)};
  },[hasLocks,busy]);
- function dismiss(record:PendingRecord){
-  try{clearLock(localStorage,record.id)}catch{}
+ async function dismiss(record:PendingRecord){
+  try{await dropLock(store,localStorage,record.id)}catch{}
   setResolutions(old=>{const next={...old};delete next[record.id];return next});syncLocks();setStage('idle');
   setStatus(dismissNotice(record));
  }
@@ -227,7 +230,7 @@ export function App(){
    ?new TxError('TX_PENDING',`${label}: you stopped waiting. The transaction was already submitted and is still being followed below. Do not send it again.`,sent)
    :new TxError('TX_UNCERTAIN',`${label}: you stopped waiting for your wallet. This page will check whether anything was sent before unlocking.`))});
   try{
-   await submitWithLock({storage,kind,label,account,to:address,data:encodeFunctionData({abi,functionName:fn,args}),value,deadline,mutex:webLocks(),
+   await submitWithLock({storage,kind,label,account,to:address,data:encodeFunctionData({abi,functionName:fn,args}),value,deadline,mutex:webLocks(),store,
     position:async()=>{const [nonce,block]=await Promise.all([client.getTransactionCount({address:account,blockTag:'latest'}),client.getBlockNumber({cacheTime:0})]);return {nonce,block}},
     send:(onHash,beforeWallet)=>Promise.race([send(connection,address,abi,fn,args,hash=>{sent=hash;onHash(hash)},value,beforeWallet),stopped]),
     notify:(next,_record,hash)=>{
@@ -296,13 +299,21 @@ export function App(){
   setStatus('Liquidity confirmed. LP tokens belong to your connected wallet.');
  }
  async function removeLiquidity(){
-  if(!connection||!pool||pool.lp===0n)throw new Error('No liquidity position in this wallet');
-  if(!await approval(pair,pool.lp,`Approve TSYS / ${selected.symbol} LP tokens`))return;
+  if(!connection)throw new Error('Connect a wallet first');
+  // Read this account's position again at one block. The minimums sent are the ones on screen, and only if the
+  // current state still covers them; otherwise the new figures are shown for review (see checkWithdrawal).
+  const fresh=await readPool(client,{pair,account:connection.address,wrapped:deployment.wrappedSYS!,factory:deployment.factory!});
+  let plan:ReturnType<typeof checkWithdrawal>;
+  try{plan=checkWithdrawal(position,fresh,connection.address,SLIPPAGE_BPS)}catch(e){setPool(fresh);setPoolAt(Date.now());throw e}
+  if(!await approval(pair,plan.lp,`Approve TSYS / ${selected.symbol} LP tokens`))return;
   const deadline=transactionDeadline((await client.getBlock()).timestamp);
-  const amounts=removalAmounts(pool.native,pool.token,pool.total,pool.lp,pool.kLast,(await client.readContract({address:deployment.factory!,abi:factoryAbi,functionName:'feeTo'}))!=='0x0000000000000000000000000000000000000000');
-  await transact('removeLiquidity',`Remove liquidity from TSYS / ${selected.symbol}`,deployment.router!,lpAbi,'removeLiquidityETH',[selected.address!,pool.lp,minimumOutput(amounts.token,SLIPPAGE_BPS),minimumOutput(amounts.native,SLIPPAGE_BPS),connection.address,deadline],0n,deadline);
+  await transact('removeLiquidity',`Remove liquidity from TSYS / ${selected.symbol}`,deployment.router!,lpAbi,'removeLiquidityETH',[selected.address!,plan.lp,plan.minToken,plan.minNative,connection.address,deadline],0n,deadline);
   setStatus('Your liquidity was removed and the assets returned to your wallet.');
  }
+ // The connected account's position, only once it has been read for that account (never another wallet's figures).
+ const position=positionOf(pool,connection?.address,pair);
+ let exit:ReturnType<typeof withdrawal>|undefined;
+ try{exit=position&&position.lp>0n?withdrawal(position,SLIPPAGE_BPS):undefined}catch{exit=undefined}
  const fmt=(n:bigint,d=18)=>Number(formatUnits(n,d)).toLocaleString('en-US',{maximumSignificantDigits:8});
  const currentQuote=!!quote&&quote.from===from&&quote.to===to&&quote.text===input;
  const expired=!!quote&&clock-quote.time>60000;
@@ -359,8 +370,8 @@ export function App(){
    </aside>
   </div>}
   {page==='pools'&&<section className="g-section"><div className="g-section-head"><div><p className="g-kicker">Liquidity</p><h2>Your liquidity, working for the pool.</h2><p>Supply both assets. Earn LP fees in proportion to your share.</p></div><span className="g-status">Testnet pools</span></div><div className="g-pools-layout"><div><div className="g-pool-columns"><span>Pool</span><span>Fee</span><span>Network</span></div>{([1,2] as const).map(i=><button className="g-pool-row" key={i} aria-pressed={market===i} disabled={busy} onClick={()=>selectMarket(i)}><span className="g-pool-pair"><span className="g-token-stack"><b>T</b><b>{i===1?'Z':'$'}</b></span><span><strong>TSYS / {assets[i].symbol}</strong><small>{i===1?'Native TSYS + existing ZKSYS':'Native TSYS + test dollar'}</small></span></span><span className="g-pool-value">0.30%</span><span className="g-pool-state">Testnet ↗</span></button>)}
-    <div className="g-position"><p className="g-kicker">Your position · TSYS / {selected.symbol}</p><h3>{connection&&pool?`${fmt(pool.lp)} LP tokens`:'Connect to see your position'}</h3><p>Pool: {pool?`${fmt(pool.native)} TSYS + ${fmt(pool.token,selected.decimals)} ${selected.symbol}`:'Loading…'}</p><p className="g-fine">{freshnessText('Pool figures',poolState,poolAt)}</p><p>Creating a pool gives no extra fee entitlement. Protocol fees mint LP shares to the treasury. Withdrawals return your share of the current reserves, which may differ from your deposit.</p>{external(`${EXPLORER}/address/${pair}`,'View pool contract ↗')}</div></div>
-    <aside className="g-pool-detail"><h3>TSYS / {selected.symbol}</h3><p className="g-pool-description">Add both assets at the current ratio.</p><div className="g-field"><label htmlFor="deposit-native">TSYS to deposit</label><div className="g-amountrow"><input id="deposit-native" inputMode="decimal" autoComplete="off" disabled={busy} value={nativeDeposit} onChange={e=>setDeposit(e.target.value)}/></div></div><div className="g-field"><label htmlFor="deposit-token">{selected.symbol} to deposit</label><div className="g-amountrow"><input id="deposit-token" inputMode="decimal" autoComplete="off" disabled={busy} value={tokenDeposit} onChange={e=>setTokenDeposit(e.target.value)}/></div></div><p className="g-fine">Changing TSYS fills the matching token amount. Minimum amounts allow 0.5% variation.</p><button className="g-action" disabled={busy||!connection||!pool||!!pending||!storageOk} onClick={()=>void run(addLiquidity)}>Approve token / add liquidity</button><button className="g-secondary" disabled={busy||!connection||!pool?.lp||!!pending||!storageOk} onClick={()=>void run(removeLiquidity)}>Approve LP / remove my position</button><p className="g-fine">If approval is requested, confirm it first, then click again to deposit or withdraw. Removal returns your entire position.</p></aside>
+    <div className="g-position"><p className="g-kicker">Your position · TSYS / {selected.symbol}</p><h3>{!connection?'Connect to see your position':position?`${fmt(position.lp)} LP tokens`:'Loading your position…'}</h3>{exit&&<p>Withdrawing now returns about {fmt(exit.native)} TSYS + {fmt(exit.token,selected.decimals)} {selected.symbol}. Minimum sent with it: {fmt(exit.minNative)} TSYS + {fmt(exit.minToken,selected.decimals)} {selected.symbol}.</p>}<p>Pool: {pool?`${fmt(pool.native)} TSYS + ${fmt(pool.token,selected.decimals)} ${selected.symbol}`:'Loading…'}</p><p className="g-fine">{freshnessText('Pool figures',poolState,poolAt)}</p><p>Creating a pool gives no extra fee entitlement. Protocol fees mint LP shares to the treasury. Withdrawals return your share of the current reserves, which may differ from your deposit.</p>{external(`${EXPLORER}/address/${pair}`,'View pool contract ↗')}</div></div>
+    <aside className="g-pool-detail"><h3>TSYS / {selected.symbol}</h3><p className="g-pool-description">Add both assets at the current ratio.</p><div className="g-field"><label htmlFor="deposit-native">TSYS to deposit</label><div className="g-amountrow"><input id="deposit-native" inputMode="decimal" autoComplete="off" disabled={busy} value={nativeDeposit} onChange={e=>setDeposit(e.target.value)}/></div></div><div className="g-field"><label htmlFor="deposit-token">{selected.symbol} to deposit</label><div className="g-amountrow"><input id="deposit-token" inputMode="decimal" autoComplete="off" disabled={busy} value={tokenDeposit} onChange={e=>setTokenDeposit(e.target.value)}/></div></div><p className="g-fine">Changing TSYS fills the matching token amount. Minimum amounts allow 0.5% variation.</p><button className="g-action" disabled={busy||!connection||!pool||!!pending||!storageOk} onClick={()=>void run(addLiquidity)}>Approve token / add liquidity</button><button className="g-secondary" disabled={busy||!connection||!position?.lp||!!pending||!storageOk} onClick={()=>void run(removeLiquidity)}>Approve LP / remove my position</button><p className="g-fine">If approval is requested, confirm it first, then click again to deposit or withdraw. Removal returns your entire position; the minimum shown is sent with it.</p></aside>
    </div></section>}
   {page==='agents'&&<section className="g-section g-agent-section"><div className="g-agent-heading"><p className="g-kicker">Built for what comes next</p><h2>A home for your agents.</h2><p>Choose how you want to connect. Agent access is on the way.</p></div><div className="g-agent-options">{[['Claude Code','✳','Your coding companion.'],['Codex','>_','From intent to execution.'],['Personal agent','{ }','Your agent, your workflow.']].map(([name,mark,desc])=><div className="g-agent-option" key={name}><div className="g-agent-bubble" aria-hidden="true"><span className={`g-agent-glyph${name==='Codex'?' g-agent-terminal':name==='Personal agent'?' g-agent-personal':''}`}>{mark}</span></div><h3>{name}</h3><p>{desc}</p><span className="g-coming">Coming soon</span></div>)}</div><div className="g-agent-foot"><span className="g-agent-dot"/>No agent connections or trading permissions are enabled.</div></section>}
   <section className="g-transaction" aria-label="Transaction status" aria-live="polite"><strong>Transaction status{pending&&!busy?` · ${stageLabels[explain(pending,resolution).stage]}`:stage!=='idle'?` · ${stageLabels[stage]}`:''}</strong>

@@ -25,6 +25,6 @@ Full texts shipped with the site: `packages/wallet-check/public/DEPENDENCY_LICEN
 
 ## Development and test tools (not distributed with the site)
 
-solc 0.8.28 (npm wrapper MIT; the bundled Solidity compiler is GPL-3.0), Ganache 7.9.2 (MIT), Vite, Vitest,
+solc 0.8.28 (npm wrapper MIT; the bundled Solidity compiler is GPL-3.0), Hardhat 3.22.0 and its EDR runtime (MIT), Vite, Vitest,
 TypeScript and tsx. Their transitive dependencies carry their own licences (MIT, ISC, Apache-2.0, BSD, MPL-2.0 and
 others), as recorded in `package-lock.json`.

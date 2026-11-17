@@ -21,12 +21,15 @@ it('returns the receipt of a successful transaction',async()=>{write.mockResolve
 describe('wallet errors that prove nothing was sent release the lock; everything else stays locked',()=>{
  const notSent:[string,unknown][]=[
   ['wallet on another chain (viem ChainMismatchError)',Object.assign(new Error('chain mismatch'),{name:'ChainMismatchError'})],
-  ['another wallet request already open (-32002)',{code:-32002,message:'Request already pending'}],
   ['wallet locked or not authorised (4100)',{code:4100}],['method unsupported (4200)',{code:4200}],
-  ['wallet disconnected (4900)',{code:4900}],['wallet disconnected from this chain (4901)',{code:4901}],
-  ['invalid parameters (-32602)',{code:-32602}],['a not-sent code nested inside viem wrappers',{cause:{cause:{code:-32002}}}],
+  ['invalid parameters (-32602)',{code:-32602}],['a not-sent code nested inside viem wrappers',{cause:{cause:{code:4100}}}],
  ];
  for(const [name,error] of notSent)it(name,async()=>{write.mockRejectedValue(error);expect(classifyWalletError(error)).toBe('not-sent');const journal=vi.fn();await expect(send(c,address,[],'swap',[],journal)).rejects.toMatchObject({code:'TX_NOT_SENT'});expect(journal).not.toHaveBeenCalled();expect(releasesLock('TX_NOT_SENT')).toBe(true)});
+ // Review finding TX-01: a disconnect (4900/4901) or "resource unavailable" (-32002) after the wallet may have been
+ // asked to send does not prove that nothing was sent, so the request stays locked until recovery finds out.
+ const mayHaveBeenSent:[string,unknown][]=[['another wallet request already open (-32002)',{code:-32002,message:'Request already pending'}],['wallet disconnected (4900)',{code:4900}],['wallet disconnected from this chain (4901)',{code:4901}],['a disconnect nested inside viem wrappers',{cause:{cause:{code:4900}}}]];
+ for(const [name,error] of mayHaveBeenSent)it('TX-01, kept locked: '+name,async()=>{write.mockRejectedValue(error);expect(classifyWalletError(error)).toBe('uncertain');expect(classifyWalletError(error,true)).toBe('uncertain');await expect(send(c,address,[],'swap',[],vi.fn())).rejects.toMatchObject({code:'TX_UNCERTAIN'});expect(releasesLock('TX_UNCERTAIN')).toBe(false)});
+ it('TX-01: the same errors before the send method was ever called prove that nothing was sent',()=>{for(const code of [4900,4901,-32002,-32603])expect(classifyWalletError({code},false)).toBe('not-sent');expect(classifyWalletError({code:4001},false)).toBe('rejected')});
  const uncertain:[string,unknown][]=[['internal wallet error (-32603)',{code:-32603}],['node error such as "already known" (-32000)',{code:-32000,message:'already known'}],['a timeout',new Error('timed out')],['no error object at all',undefined],['a string',"boom"]];
  for(const [name,error] of uncertain)it('uncertain: '+name,()=>expect(classifyWalletError(error)).toBe('uncertain'));
  it('a user rejection wins over any other code in the chain',()=>expect(classifyWalletError({code:-32603,cause:{code:4001}})).toBe('rejected'));

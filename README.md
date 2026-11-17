@@ -7,7 +7,7 @@ the trading website served at the public beta. **Testnet only. Test assets only.
 
 | Path | Contents |
 |---|---|
-| `packages/dex` | Contract artifacts and compilation (`src/contracts.ts`), protocol-fee configuration (`src/fees.ts`), shared chain/ABI constants (`src/shared.ts`), `WrappedTestSYS.sol`, the local test token `TestUSD.sol`, the testnet deployment record, and tests that deploy everything on a local in-process EVM (Ganache) |
+| `packages/dex` | Contract artifacts and compilation (`src/contracts.ts`), protocol-fee configuration (`src/fees.ts`), shared chain/ABI constants (`src/shared.ts`), `WrappedTestSYS.sol`, the local test token `TestUSD.sol`, the testnet deployment record, and tests that deploy everything on a local in-process EVM (Hardhat's EDR) |
 | `packages/dex/deployments/zksys-testnet.json` | Addresses and transaction hashes of the live testnet deployment |
 | `packages/wallet-check` | The website (React + viem): swaps with automatic quotes, liquidity, price chart, transaction-status recovery |
 | `licenses/` | Licences of third-party components (see `THIRD_PARTY_NOTICES.md`) |
@@ -34,7 +34,8 @@ npm run build
 ```
 
 - `npm test` runs every test in `packages/*/test`. The DEX tests compile `WrappedTestSYS.sol` and `TestUSD.sol` with
-  solc 0.8.28 and deploy the Uniswap V2 artifacts on a local in-memory EVM; nothing touches a network.
+  solc 0.8.28 and deploy the Uniswap V2 artifacts on Hardhat's in-process EVM with chain ID 57057 and Hardhat's public
+  test accounts; nothing touches a network (Hardhat's usage analytics are switched off in the test fixture).
   Website tests use simulated wallets and a simulated chain.
 - `npm run build` writes the website to `packages/wallet-check/dist/`.
 - `npm run dev` serves the website at http://127.0.0.1:4020 (it reads the live testnet through the public RPC;
@@ -61,7 +62,9 @@ which 0.05% goes to the protocol through Uniswap V2's `feeTo` mechanism.
 
 - `packages/wallet-check/src/tx-lock.ts` — the persisted lock around every wallet request and `recover()`, which
   settles interrupted requests from read-only chain data (cancel, speed-up, replacement, expiry by block time).
-- `packages/wallet-check/src/wallet.ts` — sending, wallet-error classification, replacement handling, amount parsing.
+- `packages/wallet-check/src/wallet.ts` — network checks, sending (one call of the wallet's send method per request),
+  wallet-error classification, replacement handling, amount parsing.
+- `packages/wallet-check/src/position.ts` — pool and position figures read at one block, and the withdrawal minimums.
 - `packages/wallet-check/src/quote-flow.ts` and `SwapDetails.tsx` — slippage floor and what is displayed versus sent.
 - `packages/wallet-check/src/refresh.ts` and `market.ts` — polling, ordering and chart history.
 - `packages/dex/src/fees.ts`, `contracts.ts` and `test/` — fee configuration and the local end-to-end tests.

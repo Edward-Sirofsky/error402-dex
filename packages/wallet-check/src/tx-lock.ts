@@ -53,8 +53,14 @@ export type Resolution =
   | {state: 'cancelled' | 'replaced'; hash: Hex}
   | {state: 'expired'}
   | {state: 'submitted'; hash: Hex; seen: boolean; dismissible: boolean}
-  | {state: 'awaiting'; until: number | null; dismissible: boolean};
-export const isFinal = (r: Resolution) => r.state !== 'submitted' && r.state !== 'awaiting';
+  | {state: 'awaiting'; until: number | null; dismissible: boolean}
+  /**
+   * An approval was found that matches this request only by contract, spender and a nonce at or after the one captured
+   * when the request was made. That is not proof: an earlier approval that was still pending at that moment matches the
+   * same way. It is shown as a possible match and the record stays (the user may stop tracking it).
+   */
+  | {state: 'possible'; hash: Hex; dismissible: true};
+export const isFinal = (r: Resolution) => r.state !== 'submitted' && r.state !== 'awaiting' && r.state !== 'possible';
 
 export const LOCK_KEY = 'error402-testnet-pending-v2';
 export const LEGACY_LOCK_KEY = 'error402-testnet-pending-v1';
@@ -95,16 +101,18 @@ function valid(r: unknown): r is PendingRecord {
  * declared expired. It is settled by its receipt (if it has a hash); otherwise the user may stop tracking it, which the
  * page describes as abandoning local tracking, not as proof that nothing happened.
  */
-export function legacyRecord(now: number, hash?: Hex): PendingRecord {
-  return {v: 2, id: 'legacy-' + now, kind: 'legacy', label: 'An earlier request from this browser', account: null, chainId: 57057, to: null, data: null, value: '0',
+export function legacyRecord(now: number, hash?: Hex, source: 'v1' | 'unreadable' = 'v1'): PendingRecord {
+  return {v: 2, id: `legacy-${source}`, kind: 'legacy', label: 'An earlier request from this browser', account: null, chainId: 57057, to: null, data: null, value: '0',
     deadline: null, nonce: null, block: null, createdAt: now, phase: hash ? 'submitted' : 'awaiting-wallet', ...(hash ? {hash} : {uncertain: true})};
 }
 /**
  * Reads every stored lock. Unreadable or malformed data is NOT treated as "no lock": it becomes a time-limited
  * legacy lock, so corruption can never silently unlock a request that might still be open in the wallet.
  * Throws only if the browser refuses storage access altogether.
+ * Every record shares one storage key, so any read-modify-write of it (this migration, save, clear, replace) must run
+ * inside a `StoreLock` to be atomic across tabs.
  */
-export function readLocks(storage: Store, now = Date.now()): PendingRecord[] {
+export function readLocks(storage: Store, now = Date.now(), persist = true): PendingRecord[] {
   const records: PendingRecord[] = [];
   let rewrite = false;
   const raw = storage.getItem(LOCK_KEY);
@@ -113,11 +121,13 @@ export function readLocks(storage: Store, now = Date.now()): PendingRecord[] {
       const parsed = JSON.parse(raw);
       if (!Array.isArray(parsed) || parsed.length > 20 || !parsed.every(valid)) throw new Error('invalid');
       records.push(...parsed);
-    } catch { records.push(legacyRecord(now)); rewrite = true; }
+    } catch { records.push(legacyRecord(now, undefined, 'unreadable')); rewrite = true; }
   }
   const old = storage.getItem(LEGACY_LOCK_KEY);
   if (old !== null) { records.push(legacyRecord(now, isHash(old) ? old : undefined)); rewrite = true; }
-  if (rewrite) { writeLocks(storage, records); storage.removeItem(LEGACY_LOCK_KEY); }
+  // Migration writes, so it must run under the storage lock (see `StoreLock`). A plain display read passes
+  // persist = false: it sees the same records (with the same ids) and changes nothing.
+  if (rewrite && persist) { writeLocks(storage, records); storage.removeItem(LEGACY_LOCK_KEY); }
   return records;
 }
 export function writeLocks(storage: Store, records: PendingRecord[]) {
@@ -184,7 +194,8 @@ async function scan(record: PendingRecord, reader: ChainReader, head: bigint, ma
  *  - if the transaction's nonce was used by something else, that transaction is found and compared:
  *    identical request = speed-up (follow it), 0-value self-transfer = cancelled, anything else = replaced;
  *  - with no hash, only a transaction from the same account with the same contract, value and calldata, and a nonce
- *    at or after the one captured for the request, is adopted;
+ *    at or after the one captured for the request, is adopted. For an approval that is not unique (an earlier approval
+ *    still pending at that moment matches too), so it is reported as a POSSIBLE match and the record is kept;
  *  - "expired" is declared only for a request with a router deadline, only when the latest block's timestamp (the
  *    value the router checks) is past that deadline, and only once the block search has caught up with that block.
  *    Block timestamps never go backwards, so any later inclusion can only revert. The local clock is never used: a
@@ -230,6 +241,9 @@ export async function recover(input: PendingRecord, reader: ChainReader, nowMs =
         if (found && found.hash.toLowerCase() !== hash.toLowerCase()) {
           const replacement = await reader.receipt(found.hash);
           if (!replacement) return {record, resolution: {state: 'submitted', hash, seen: true, dismissible: false}};
+          // Same nonce slot (known exactly) = a speed-up of this request. A match found only by the nonce lower bound
+          // proves that for swaps and liquidity (their calldata includes this request's deadline) but not for approvals.
+          if (sameRequest(found, record) && record.kind === 'approve' && slot === undefined) return {record, resolution: {state: 'possible', hash: found.hash, dismissible: true}};
           if (sameRequest(found, record)) {
             record = {...record, hash: found.hash, txNonce: found.nonce, repricedFrom: record.repricedFrom ?? hash};
             return {record, resolution: outcome(replacement.status, found.hash)};
@@ -243,6 +257,7 @@ export async function recover(input: PendingRecord, reader: ChainReader, nowMs =
     }
     if (record.account && record.data && record.nonce !== null && latest !== null && latest > record.nonce) {
       const result = await scan(record, reader, head.number, candidate => laterSameRequest(candidate, record));
+      if (result.found && record.kind === 'approve') return {record, resolution: {state: 'possible', hash: result.found.hash, dismissible: true}};
       if (result.found) { record = {...record, phase: 'submitted', hash: result.found.hash, txNonce: result.found.nonce, scannedTo: undefined}; continue; }
       record = {...record, scannedTo: result.scannedTo};
       caughtUp = result.caughtUp;
@@ -267,8 +282,12 @@ export interface SubmitInput {
   deadline: bigint | null;
   /** Reads the account's mined-transaction count and the current block; called before anything is stored. */
   position: () => Promise<{nonce: number; block: bigint}>;
-  /** Performs the wallet request. Must call `beforeWallet` immediately before opening the wallet and `onHash` for every hash. */
-  send: (onHash: (hash: Hex) => void, beforeWallet: () => void) => Promise<unknown>;
+  /**
+   * Performs the wallet request. Must call `beforeWallet` immediately before opening the wallet and wait for the promise
+   * it returns (the record is stored when it resolves; if it rejects, the wallet must not be opened), and call `onHash`
+   * for every hash.
+   */
+  send: (onHash: (hash: Hex) => void, beforeWallet: () => Promise<void>) => Promise<unknown>;
   /** Told about every change so the page can show it. */
   notify?: (stage: Stage, record: PendingRecord | undefined, hash?: Hex) => void;
   /**
@@ -283,6 +302,22 @@ export interface SubmitInput {
    * same instant could both pass the storage re-check; with it, the second is refused at once.
    */
   mutex?: Mutex;
+  /** Cross-tab lock for every write of the stored records (see `StoreLock`). */
+  store?: StoreLock;
+}
+/**
+ * Runs `fn` (a short, synchronous read-modify-write of the stored records) while holding one exclusive lock shared by
+ * every tab of this site, so two tabs can never interleave their reads and writes of the shared key. This is separate
+ * from the per-account wallet lock below, which is held for the whole wallet request.
+ */
+export type StoreLock = <T>(fn: () => T) => Promise<T>;
+export const STORE_LOCK_NAME = 'error402-tx-records';
+/** No cross-tab lock (the browser lacks Web Locks): `fn` still runs at once, in this tab only. */
+export const unlockedStore: StoreLock = async fn => fn();
+type StoreLockManager = {request: (name: string, callback: (lock: unknown) => Promise<unknown>) => Promise<unknown>};
+export function storeLock(locks: StoreLockManager | null | undefined = (globalThis as {navigator?: {locks?: StoreLockManager}}).navigator?.locks): StoreLock {
+  if (!locks || typeof locks.request !== 'function') return unlockedStore;
+  return <T>(fn: () => T) => locks.request(STORE_LOCK_NAME, async () => fn()) as Promise<T>;
 }
 /** Runs `run` while holding the exclusive lock `name`, or throws TX_LOCKED at once if another tab holds it. */
 export type Mutex = (name: string, run: () => Promise<void>) => Promise<void>;
@@ -314,42 +349,56 @@ export async function submitWithLock(input: SubmitInput): Promise<void> {
   return submitUnderLock(input);
 }
 async function submitUnderLock(input: SubmitInput): Promise<void> {
-  const {storage, account, notify} = input;
-  if (lockFor(readLocks(storage), account)) throw lockedError();
+  const {storage, account, notify} = input, store = input.store ?? unlockedStore;
+  if (await store(() => lockFor(readLocks(storage), account))) throw lockedError();
   const {nonce, block} = await input.position();
   let record: PendingRecord | undefined;
   /** Set once this call has returned or thrown; anything the wallet reports afterwards is a late callback. */
   let settled = false;
-  const persist = (next: PendingRecord) => { record = next; saveLock(storage, next); };
-  const release = () => { if (record) { try { clearLock(storage, record.id); } catch { /* storage vanished: nothing more can be done */ } } };
+  // Each write takes the storage lock on its own. Web Locks grants requests for one name in the order they were made,
+  // so a later state is never overwritten by an earlier one (and without Web Locks each write runs at once).
+  const persist = (next: PendingRecord) => { record = next; return store(() => saveLock(storage, next)); };
+  const release = async () => {
+    if (record) { const id = record.id; try { await store(() => clearLock(storage, id)); } catch { /* storage vanished: nothing more can be done */ } }
+  };
   try {
     await input.send(hash => {
       if (record) {
         const speedUp = record.hash && record.hash.toLowerCase() !== hash.toLowerCase();
-        try { persist({...record, phase: 'submitted', hash, uncertain: undefined, scannedTo: undefined, ...(speedUp ? {repricedFrom: record.repricedFrom ?? record.hash} : {})}); } catch { /* the transaction is already sent; keep going */ }
+        persist({...record, phase: 'submitted', hash, uncertain: undefined, scannedTo: undefined, ...(speedUp ? {repricedFrom: record.repricedFrom ?? record.hash} : {})}).catch(() => { /* the transaction is already sent; keep going */ });
       }
       if (settled) { if (record) input.late?.(record, hash); return; }
       notify?.('submitted', record, hash);
     }, () => {
       // The caller already gave up on this request (e.g. "Stop waiting"): never open the wallet after that.
       if (settled) throw Object.assign(new Error('This request was abandoned before the wallet opened.'), {code: 'TX_NOT_SENT'});
-      // Re-check at the last moment: another tab may have opened a request while this one was simulating.
-      if (lockFor(readLocks(storage), account)) throw lockedError();
-      persist(newRecord({kind: input.kind, label: input.label, account, to: input.to, data: input.data, value: input.value, deadline: input.deadline, nonce, block}));
-      notify?.('awaiting-wallet', record);
+      // Re-check at the last moment (another tab may have opened a request while this one was simulating) and store
+      // the record in the same locked step, so no other tab can write in between.
+      const next = newRecord({kind: input.kind, label: input.label, account, to: input.to, data: input.data, value: input.value, deadline: input.deadline, nonce, block});
+      return store(() => {
+        if (lockFor(readLocks(storage), account)) throw lockedError();
+        saveLock(storage, next);
+      }).then(() => { record = next; notify?.('awaiting-wallet', record); });
     });
   } catch (e) {
     settled = true;
     const error = e as {code?: string; hash?: Hex};
-    if (releasesLock(error.code)) release();
-    else if (error.code === 'TX_UNCERTAIN' && record) { try { persist({...record, uncertain: true}); } catch { /* keep the stored record as it is */ } }
+    if (releasesLock(error.code)) await release();
+    else if (error.code === 'TX_UNCERTAIN' && record) { try { await persist({...record, uncertain: true}); } catch { /* keep the stored record as it is */ } }
     if (error.code && stageOfCode[error.code]) notify?.(stageOfCode[error.code], releasesLock(error.code) ? undefined : record, error.hash);
     throw e;
   }
   settled = true;
-  release();
+  await release();
   notify?.('confirmed', undefined, record?.hash);
 }
+
+/** Compare-and-swap of one stored record under the storage lock (see `replaceLock`). */
+export const settleLock = (store: StoreLock, storage: Store, expected: PendingRecord, next: PendingRecord | null) => store(() => replaceLock(storage, expected, next));
+/** Removes one stored record under the storage lock (the user stopped tracking it). */
+export const dropLock = (store: StoreLock, storage: Store, id: string) => store(() => clearLock(storage, id));
+/** Reads the stored records under the storage lock, migrating old or unreadable data once. */
+export const loadLocks = (store: StoreLock, storage: Store) => store(() => readLocks(storage));
 
 const clock = (seconds: number) => new Date(seconds * 1000).toISOString().slice(11, 16) + ' UTC';
 /** Short heading for the transaction-status panel. */
@@ -380,6 +429,7 @@ export function explain(record: PendingRecord, resolution?: Resolution): {stage:
       ? `${what}: submitted and still waiting for the network. Do not send it again. You can speed it up or cancel it in your wallet; this page will follow the result.`
       : `${what}: submitted, but the network does not show it at the moment. Check your wallet's activity list.${deadline !== null ? autoUnlock(deadline) : ''}`)
       + (resolution.dismissible ? trackingNote(record, resolution.seen) : '')};
+    case 'possible': return {stage: 'uncertain', text: `${what}: an approval matching this request was found on the network (transaction ${resolution.hash.slice(0, 10)}…), but it may be an earlier approval from this wallet rather than this one. Check your wallet's activity list to see whether this request is still open.` + trackingNote(record, false)};
     case 'awaiting': return {stage: record.uncertain ? 'uncertain' : 'awaiting-wallet', text: `${what}: ${record.kind === 'legacy' ? 'an earlier version of this page left this request open' : record.uncertain ? 'your wallet did not say whether it sent this request' : 'this request was open in your wallet'}. `
       + 'If the request is still open in your wallet, confirm or reject it there. No matching transaction has been found yet.'
       + (resolution.until !== null ? autoUnlock(resolution.until) : resolution.dismissible ? trackingNote(record, false) : '')};

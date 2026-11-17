@@ -59,13 +59,20 @@ export function walletSaid(error:unknown):string{
 }
 const quoted=(error:unknown)=>{const said=walletSaid(error);return said?` Your wallet said: “${said}”.`:''};
 export {releasesLock} from './tx-lock';
-// EIP-1193 / EIP-1474 codes that mean the wallet refused or could not process the request, so nothing was broadcast.
-// 4100 unauthorised, 4200 unsupported method, 4900/4901 disconnected, -32002 another request already open,
-// -32601 method not found, -32602 invalid parameters. Anything else stays "uncertain" (fail closed).
-const NOT_SENT_CODES=new Set([4100,4200,4900,4901,-32002,-32601,-32602]);
+// EIP-1193 / EIP-1474 codes that mean the wallet refused the request itself, before processing it: 4100 unauthorised,
+// 4200 unsupported method, -32601 method not found, -32602 invalid parameters. NOT included: 4900/4901 (disconnected)
+// and -32002 (resource unavailable). A disconnect can happen after the wallet has already forwarded the transaction,
+// and -32002 is not defined narrowly enough to prove that nothing was sent, so once the send method has been called
+// those stay "uncertain" (fail closed) and the request stays locked until recovery finds out.
+const NOT_SENT_CODES=new Set([4100,4200,-32601,-32602]);
+// Errors viem raises itself before it calls the wallet's send method.
 const NOT_SENT_NAMES=new Set(['ChainMismatchError','ChainNotFoundError','AccountNotFoundError','ClientChainNotConfiguredError']);
-/** Classifies a failed wallet request by walking the nested causes that viem and wallets attach. */
-export function classifyWalletError(error:unknown):'rejected'|'not-sent'|'uncertain'{
+/**
+ * Classifies a failed wallet request by walking the nested causes that viem and wallets attach.
+ * `sendInvoked` says whether the wallet's send method was called: false means it provably was not (nothing can have
+ * been sent), 'unknown' is treated like true.
+ */
+export function classifyWalletError(error:unknown,sendInvoked:boolean|'unknown'='unknown'):'rejected'|'not-sent'|'uncertain'{
  let notSent=false,cause:unknown=error;
  for(let i=0;i<8&&cause;i++){
   const detail=cause as {code?:unknown;name?:unknown;cause?:unknown};
@@ -73,25 +80,47 @@ export function classifyWalletError(error:unknown):'rejected'|'not-sent'|'uncert
   if((typeof detail.code==='number'&&NOT_SENT_CODES.has(detail.code))||(typeof detail.name==='string'&&NOT_SENT_NAMES.has(detail.name)))notSent=true;
   cause=detail.cause;
  }
- return notSent?'not-sent':'uncertain';
+ return notSent||sendInvoked===false?'not-sent':'uncertain';
+}
+const SEND_METHODS=new Set(['eth_sendTransaction','wallet_sendTransaction']);
+/**
+ * Wraps the wallet so that one request can reach its send method at most once. viem retries a failed
+ * eth_sendTransaction as wallet_sendTransaction for some errors; this page never lets that happen, because the first
+ * attempt may have been accepted despite the error. The second attempt is refused with "method not supported", which
+ * makes viem report the FIRST error, and that is what gets classified.
+ */
+export function singleSend(provider:Provider){
+ let invoked=false,observed=false;
+ const wrapped={request:async(args:{method:string;params?:unknown})=>{
+  observed=true;
+  if(SEND_METHODS.has(args.method)){
+   if(invoked)throw Object.assign(new Error('A second send attempt for the same request was blocked.'),{code:-32004});
+   invoked=true;
+  }
+  return provider.request(args as never);
+ }} as Provider;
+ /** true: send was called; false: the wallet was used but send was never called; 'unknown': the wallet was never reached through this wrapper. */
+ return {provider:wrapped,sendInvoked:():boolean|'unknown'=>invoked?true:observed?false:'unknown'};
 }
 /**
  * Simulates, asks the wallet, then follows the transaction to its real outcome.
  * `onHash` is called with the hash the wallet returned and again with the new hash if the wallet speeds the
  * transaction up. A cancellation or an unrelated replacement is reported as such and never as success.
  */
-export async function send(c:Connection,address:Address,abi:Abi,functionName:string,args:unknown[],onHash:(hash:Hex)=>void,value=0n,beforeWalletRequest:()=>void=()=>{}):Promise<TransactionReceipt>{
+export async function send(c:Connection,address:Address,abi:Abi,functionName:string,args:unknown[],onHash:(hash:Hex)=>void,value=0n,beforeWalletRequest:()=>unknown=()=>{}):Promise<TransactionReceipt>{
  await guard(c);
  const simulation=await client.simulateContract({account:c.address,address,abi,functionName,args,value});
  const gas=await client.estimateContractGas({account:c.address,address,abi,functionName,args,value});
  await guard(c);
- const wallet=createWalletClient({account:c.address,chain,transport:custom(c.provider)});
+ const once=singleSend(c.provider);
+ const wallet=createWalletClient({account:c.address,chain,transport:custom(once.provider,{retryCount:0})});
  let hash:Hex;
- // Persist a lock BEFORE opening the wallet, including reloads while its prompt is open.
- beforeWalletRequest();
+ // Persist a lock BEFORE opening the wallet, including reloads while its prompt is open. If it cannot be stored, the
+ // wallet is never opened.
+ await beforeWalletRequest();
  try{hash=await wallet.writeContract({...simulation.request,gas:gas*2n});}
  catch(e){
-  const kind=classifyWalletError(e);
+  const kind=classifyWalletError(e,once.sendInvoked());
   // One message per outcome. "Rejected" also covers a wallet that closed its window after showing its own error.
   if(kind==='rejected')throw new TxError('TX_REJECTED','The request was not approved in your wallet (rejected, or the wallet window was closed), so nothing was submitted.'+quoted(e));
   if(kind==='not-sent')throw new TxError('TX_NOT_SENT','Your wallet could not take this request (it may be locked, busy with another request, or on a different network). Nothing was submitted.'+quoted(e));

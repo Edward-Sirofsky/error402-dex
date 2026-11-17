@@ -18,18 +18,18 @@ function request(storage:ReturnType<typeof memory>,send:Send,over:Partial<Submit
 }
 /** Wallet behaviours. Each one calls `beforeWallet` first, exactly as the real send() does. */
 const wallet={
- confirms:(hash=h(1)):Send=>async(onHash,before)=>{before();onHash(hash)},
- rejects:():Send=>async(_onHash,before)=>{before();throw fail('TX_REJECTED')},
- cannotTake:():Send=>async(_onHash,before)=>{before();throw fail('TX_NOT_SENT')},
- uncertain:():Send=>async(_onHash,before)=>{before();throw fail('TX_UNCERTAIN')},
- timesOut:(hash=h(1)):Send=>async(onHash,before)=>{before();onHash(hash);throw fail('TX_PENDING',hash)},
- reverts:(hash=h(1)):Send=>async(onHash,before)=>{before();onHash(hash);throw fail('TX_REVERTED',hash)},
- cancelled:(hash=h(1)):Send=>async(onHash,before)=>{before();onHash(hash);throw fail('TX_CANCELLED',h(2))},
- replaced:(hash=h(1)):Send=>async(onHash,before)=>{before();onHash(hash);throw fail('TX_REPLACED',h(2))},
- spedUp:():Send=>async(onHash,before)=>{before();onHash(h(1));onHash(h(2))},
+ confirms:(hash=h(1)):Send=>async(onHash,before)=>{await before();onHash(hash)},
+ rejects:():Send=>async(_onHash,before)=>{await before();throw fail('TX_REJECTED')},
+ cannotTake:():Send=>async(_onHash,before)=>{await before();throw fail('TX_NOT_SENT')},
+ uncertain:():Send=>async(_onHash,before)=>{await before();throw fail('TX_UNCERTAIN')},
+ timesOut:(hash=h(1)):Send=>async(onHash,before)=>{await before();onHash(hash);throw fail('TX_PENDING',hash)},
+ reverts:(hash=h(1)):Send=>async(onHash,before)=>{await before();onHash(hash);throw fail('TX_REVERTED',hash)},
+ cancelled:(hash=h(1)):Send=>async(onHash,before)=>{await before();onHash(hash);throw fail('TX_CANCELLED',h(2))},
+ replaced:(hash=h(1)):Send=>async(onHash,before)=>{await before();onHash(hash);throw fail('TX_REPLACED',h(2))},
+ spedUp:():Send=>async(onHash,before)=>{await before();onHash(h(1));onHash(h(2))},
  simulationFails:():Send=>async()=>{throw new Error('execution reverted: INSUFFICIENT_OUTPUT_AMOUNT')},
  /** The page is reloaded while the prompt is open: the promise never settles in this page's lifetime. */
- neverAnswers:():Send=>(_onHash,before)=>{before();return new Promise(()=>{})},
+ neverAnswers:():Send=>async(_onHash,before)=>{await before();return new Promise(()=>{})},
 };
 function chain(){
  const state={head:100n,time:Math.floor(Date.now()/1000),nonce:7,receipts:new Map<string,'success'|'reverted'>(),txs:new Map<string,ChainTx>(),blocks:new Map<bigint,ChainTx[]>()};
@@ -39,28 +39,28 @@ function chain(){
 }
 
 describe('outcomes that settle the request release the lock',()=>{
- it('a confirmed swap: stored before the wallet opens, marked submitted, then released',async()=>{const s=memory();const seen:string[]=[];const send:Send=async(onHash,before)=>{seen.push('before:'+readLocks(s).length);before();seen.push('locked:'+readLocks(s)[0].phase);onHash(h(1));seen.push('hash:'+readLocks(s)[0].phase+':'+readLocks(s)[0].hash)};const r=request(s,send);await r.run();expect(seen).toEqual(['before:0','locked:awaiting-wallet','hash:submitted:'+h(1)]);expect(readLocks(s)).toEqual([]);expect(r.stages).toEqual(['awaiting-wallet','submitted','confirmed'])});
+ it('a confirmed swap: stored before the wallet opens, marked submitted, then released',async()=>{const s=memory();const seen:string[]=[];const send:Send=async(onHash,before)=>{seen.push('before:'+readLocks(s).length);await before();seen.push('locked:'+readLocks(s)[0].phase);onHash(h(1));seen.push('hash:'+readLocks(s)[0].phase+':'+readLocks(s)[0].hash)};const r=request(s,send);await r.run();expect(seen).toEqual(['before:0','locked:awaiting-wallet','hash:submitted:'+h(1)]);expect(readLocks(s)).toEqual([]);expect(r.stages).toEqual(['awaiting-wallet','submitted','confirmed'])});
  it('an explicit rejection: nothing was sent, so it unlocks at once',async()=>{const s=memory(),r=request(s,wallet.rejects());await expect(r.run()).rejects.toMatchObject({code:'TX_REJECTED'});expect(readLocks(s)).toEqual([]);expect(r.stages).toEqual(['awaiting-wallet','rejected'])});
  it('a wallet that could not take the request (locked, busy, wrong network): unlocks at once',async()=>{const s=memory(),r=request(s,wallet.cannotTake());await expect(r.run()).rejects.toMatchObject({code:'TX_NOT_SENT'});expect(readLocks(s)).toEqual([]);expect(r.stages.at(-1)).toBe('not-sent')});
  it('a transaction that failed on-chain: unlocks',async()=>{const s=memory(),r=request(s,wallet.reverts());await expect(r.run()).rejects.toMatchObject({code:'TX_REVERTED'});expect(readLocks(s)).toEqual([]);expect(r.stages.at(-1)).toBe('reverted')});
  it('a wallet Cancel: unlocks and is never reported as confirmed',async()=>{const s=memory(),r=request(s,wallet.cancelled());await expect(r.run()).rejects.toMatchObject({code:'TX_CANCELLED'});expect(readLocks(s)).toEqual([]);expect(r.stages).toEqual(['awaiting-wallet','submitted','cancelled']);expect(r.stages).not.toContain('confirmed')});
  it('a replacement by a different transaction: unlocks and is never reported as confirmed',async()=>{const s=memory(),r=request(s,wallet.replaced());await expect(r.run()).rejects.toMatchObject({code:'TX_REPLACED'});expect(readLocks(s)).toEqual([]);expect(r.stages.at(-1)).toBe('replaced')});
- it('a wallet Speed up: the record follows the new hash and the request ends confirmed',async()=>{const s=memory();const hashes:(string|undefined)[]=[];const send:Send=async(onHash,before)=>{before();onHash(h(1));onHash(h(2));hashes.push(readLocks(s)[0].hash,readLocks(s)[0].repricedFrom)};const r=request(s,send);await r.run();expect(hashes).toEqual([h(2),h(1)]);expect(readLocks(s)).toEqual([]);expect(r.stages.at(-1)).toBe('confirmed')});
+ it('a wallet Speed up: the record follows the new hash and the request ends confirmed',async()=>{const s=memory();const hashes:(string|undefined)[]=[];const send:Send=async(onHash,before)=>{await before();onHash(h(1));onHash(h(2));hashes.push(readLocks(s)[0].hash,readLocks(s)[0].repricedFrom)};const r=request(s,send);await r.run();expect(hashes).toEqual([h(2),h(1)]);expect(readLocks(s)).toEqual([]);expect(r.stages.at(-1)).toBe('confirmed')});
  it('the same rules hold for approvals and liquidity',async()=>{for(const kind of ['approve','addLiquidity','removeLiquidity'] as const){const s=memory();await request(s,wallet.confirms(),{kind,deadline:kind==='approve'?null:deadline()}).run();expect(readLocks(s)).toEqual([]);const t=memory();await expect(request(t,wallet.cancelled(),{kind}).run()).rejects.toMatchObject({code:'TX_CANCELLED'});expect(readLocks(t)).toEqual([]);const u=memory();await expect(request(u,wallet.uncertain(),{kind}).run()).rejects.toMatchObject({code:'TX_UNCERTAIN'});expect(readLocks(u)[0]).toMatchObject({kind,uncertain:true})}});
 });
 
 describe('outcomes that are not settled stay locked',()=>{
  it('an uncertain wallet failure keeps the lock and marks it uncertain',async()=>{const s=memory(),r=request(s,wallet.uncertain());await expect(r.run()).rejects.toMatchObject({code:'TX_UNCERTAIN'});expect(readLocks(s)[0]).toMatchObject({phase:'awaiting-wallet',uncertain:true,nonce:7,block:'100'});expect(r.stages.at(-1)).toBe('uncertain')});
  it('a receipt timeout keeps the lock together with the hash',async()=>{const s=memory(),r=request(s,wallet.timesOut());await expect(r.run()).rejects.toMatchObject({code:'TX_PENDING'});expect(readLocks(s)[0]).toMatchObject({phase:'submitted',hash:h(1)});expect(r.stages.at(-1)).toBe('submitted')});
- it('an unknown error after the wallet opened keeps the lock (fail closed)',async()=>{const s=memory();const send:Send=async(_h,before)=>{before();throw new Error('something unexpected')};await expect(request(s,send).run()).rejects.toThrow('unexpected');expect(readLocks(s)).toHaveLength(1)});
+ it('an unknown error after the wallet opened keeps the lock (fail closed)',async()=>{const s=memory();const send:Send=async(_h,before)=>{await before();throw new Error('something unexpected')};await expect(request(s,send).run()).rejects.toThrow('unexpected');expect(readLocks(s)).toHaveLength(1)});
  it('a failed simulation never stores a lock: the wallet was not opened',async()=>{const s=memory(),r=request(s,wallet.simulationFails());await expect(r.run()).rejects.toThrow('INSUFFICIENT_OUTPUT_AMOUNT');expect(readLocks(s)).toEqual([]);expect(r.stages).toEqual([])});
 });
 
 describe('no duplicate transactions',()=>{
  it('refuses a second request while one is open, without touching the wallet',async()=>{const s=memory();await expect(request(s,wallet.uncertain()).run()).rejects.toBeDefined();const send=vi.fn(wallet.confirms());await expect(request(s,send).run()).rejects.toMatchObject({code:'TX_LOCKED'});expect(send).not.toHaveBeenCalled();expect(readLocks(s)).toHaveLength(1)});
- it('refuses when another tab opened a request after this page loaded',async()=>{const s=memory();void request(s,wallet.neverAnswers()).run();await Promise.resolve();const send=vi.fn(wallet.confirms());await expect(request(s,send).run()).rejects.toMatchObject({code:'TX_LOCKED'});expect(send).not.toHaveBeenCalled()});
- it('refuses at the last moment if another tab took the lock while this one was simulating',async()=>{const s=memory();const opened=vi.fn();const send:Send=async(onHash,before)=>{void request(s,wallet.neverAnswers()).run();await Promise.resolve();await Promise.resolve();before();opened();onHash(h(5))};await expect(request(s,send).run()).rejects.toMatchObject({code:'TX_LOCKED'});expect(opened).not.toHaveBeenCalled();expect(readLocks(s)).toHaveLength(1)});
- it('does not open the wallet if the lock cannot be stored',async()=>{const s=memory();const broken={...s,setItem:()=>{throw new Error('quota exceeded')}};const opened=vi.fn();const send:Send=async(onHash,before)=>{before();opened();onHash(h(1))};await expect(request(broken as never,send).run()).rejects.toThrow('quota');expect(opened).not.toHaveBeenCalled()});
+ it('refuses when another tab opened a request after this page loaded',async()=>{const s=memory();void request(s,wallet.neverAnswers()).run();await vi.waitFor(()=>expect(readLocks(s)).toHaveLength(1));const send=vi.fn(wallet.confirms());await expect(request(s,send).run()).rejects.toMatchObject({code:'TX_LOCKED'});expect(send).not.toHaveBeenCalled()});
+ it('refuses at the last moment if another tab took the lock while this one was simulating',async()=>{const s=memory();const opened=vi.fn();const send:Send=async(onHash,before)=>{void request(s,wallet.neverAnswers()).run();await Promise.resolve();await Promise.resolve();await before();opened();onHash(h(5))};await expect(request(s,send).run()).rejects.toMatchObject({code:'TX_LOCKED'});expect(opened).not.toHaveBeenCalled();expect(readLocks(s)).toHaveLength(1)});
+ it('does not open the wallet if the lock cannot be stored',async()=>{const s=memory();const broken={...s,setItem:()=>{throw new Error('quota exceeded')}};const opened=vi.fn();const send:Send=async(onHash,before)=>{await before();opened();onHash(h(1))};await expect(request(broken as never,send).run()).rejects.toThrow('quota');expect(opened).not.toHaveBeenCalled()});
  it('a lock for one account does not block another account',async()=>{const s=memory();await expect(request(s,wallet.uncertain()).run()).rejects.toBeDefined();await request(s,wallet.confirms(h(8)),{account:other}).run();expect(readLocks(s)).toHaveLength(1);expect(lockFor(readLocks(s),other)).toBeUndefined();expect(lockFor(readLocks(s),user)).toBeDefined()});
  it('never calls the wallet more than once per request, whatever the outcome',async()=>{for(const behaviour of [wallet.confirms(),wallet.rejects(),wallet.uncertain(),wallet.timesOut(),wallet.cancelled(),wallet.reverts()]){const send=vi.fn(behaviour);await request(memory(),send).run().catch(()=>{});expect(send).toHaveBeenCalledTimes(1)}});
 });

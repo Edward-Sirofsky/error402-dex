@@ -5,7 +5,7 @@
 import {beforeEach,describe,it,expect} from 'vitest';
 import {createElement} from 'react';
 import {renderToStaticMarkup} from 'react-dom/server';
-import {LEGACY_LOCK_KEY,LOCK_KEY,newRecord} from '../src/tx-lock';
+import {LEGACY_LOCK_KEY,LOCK_KEY,newRecord,loadLocks,unlockedStore} from '../src/tx-lock';
 
 const memory=()=>{const map=new Map<string,string>();return {getItem:(k:string)=>map.get(k)??null,setItem:(k:string,v:string)=>{map.set(k,v)},removeItem:(k:string)=>{map.delete(k)},map}};
 let storage:ReturnType<typeof memory>|{getItem:()=>never;setItem:()=>never;removeItem:()=>never};
@@ -22,13 +22,17 @@ describe('first render of the page',()=>{
   expect(text(html)).not.toMatch(/Trading stays locked/);expect(swapButton(html)).not.toMatch(/disabled/);
   expect(text(html)).toMatch(/Slippage limit 0\.50%/);expect(text(html)).toMatch(/Minimum received — ZKSYS/);
  });
- it('with a request left by the old version: locked at once, never "expired", with the recovery controls',()=>{
+ it('with a request left by the old version: locked at once, never "expired", with the recovery controls',async()=>{
   (storage as ReturnType<typeof memory>).setItem(LEGACY_LOCK_KEY,'unknown');const html=page();
   expect(text(html)).toMatch(/Transaction status · Outcome not yet known/);
   expect(text(html)).toMatch(/An earlier request from this browser: a wallet request was open\. Checking what happened/);
   expect(text(html)).toMatch(/Trading stays locked meanwhile so nothing is sent twice/);expect(text(html)).toMatch(/Check status now/);
   expect(swapButton(html)).toMatch(/disabled/);expect(text(html)).not.toMatch(/Expired/);
-  const [migrated]=JSON.parse((storage as ReturnType<typeof memory>).getItem(LOCK_KEY)!);expect(migrated).toMatchObject({kind:'legacy',deadline:null});
+  // Rendering never writes storage (TX-03): the old data is migrated later, under the cross-tab storage lock.
+  expect((storage as ReturnType<typeof memory>).getItem(LEGACY_LOCK_KEY)).toBe('unknown');expect((storage as ReturnType<typeof memory>).getItem(LOCK_KEY)).toBeNull();
+  await loadLocks(unlockedStore,storage as ReturnType<typeof memory>);
+  const [migrated]=JSON.parse((storage as ReturnType<typeof memory>).getItem(LOCK_KEY)!);expect(migrated).toMatchObject({kind:'legacy',deadline:null,id:'legacy-v1'});
+  expect(text(page())).toMatch(/An earlier request from this browser: a wallet request was open/); // same record, same id, after migration
  });
  it('with corrupt lock data: treated as a lock, never as "no lock"',()=>{
   (storage as ReturnType<typeof memory>).setItem(LOCK_KEY,'{not json');const html=page();
